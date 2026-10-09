@@ -38,7 +38,16 @@ html, body, [class*="css"] { font-family: 'DM Sans', sans-serif; }
 .metric-value { color:#17263d; font-family:'Manrope',sans-serif; font-size:1.8rem; font-weight:800; margin-top:8px; }
 .section-title { font-family:'Manrope',sans-serif; font-size:1.18rem; color:#18283f; font-weight:800; margin:8px 0 3px; }
 .section-sub { color:#78859a; font-size:.86rem; margin-bottom:15px; }
-.panel { background:white; border:1px solid #e7ebf2; border-radius:16px; padding:20px; }
+.panel { background:white; border:1px solid #e7ebf2; border-radius:16px; padding:20px; color:#17263d !important; }
+.property-card { background:#ffffff; border:1px solid #dfe6f0; border-radius:18px; padding:22px; margin:4px 0 18px; min-height:255px; box-shadow:0 8px 24px rgba(20,36,59,.07); color:#17263d !important; }
+.property-card * { color:#17263d !important; }
+.property-tag { display:inline-block; background:#e8f7f3; color:#087e70 !important; padding:5px 10px; border-radius:20px; font-size:.72rem; font-weight:800; letter-spacing:.04em; margin-bottom:13px; }
+.property-name { font-family:'Manrope',sans-serif; font-size:1.25rem; line-height:1.35; font-weight:800; margin-bottom:6px; color:#14243b !important; }
+.property-builder { font-size:.94rem; font-weight:700; color:#476078 !important; margin-bottom:13px; }
+.property-detail { font-size:.9rem; color:#526176 !important; margin:8px 0; }
+.property-price { font-family:'Manrope',sans-serif; font-size:1.55rem; font-weight:800; color:#087e70 !important; margin:17px 0 12px; }
+.property-link { color:#1769d2 !important; font-weight:700; text-decoration:none; }
+.property-link:hover { text-decoration:underline; }
 .small-muted { color:#7a879a; font-size:.78rem; }
 div[data-testid="stChatMessage"] { background:white; border:1px solid #e7ebf2; border-radius:14px; }
 .stButton button { border-radius:10px; font-weight:700; }
@@ -59,7 +68,7 @@ COMPANIES = [
     {"name":"Assetz Property Group","type":"Residential & Commercial Real Estate","location":"Bengaluru, Karnataka","url":"https://www.assetzproperty.com/"},
 ]
 
-# Illustrative demo records for UI testing only; not verified live property listings.
+# Demo records for the UI only; not verified live inventory.
 PROPERTIES = [
     {"name":"Sample Residency","builder":"Prestige Group","city":"Bengaluru","bhk":2,"price_lakh":95,"area":"Whitefield","url":"https://www.prestigeltd.in/"},
     {"name":"Sample Heights","builder":"Prestige Group","city":"Bengaluru","bhk":3,"price_lakh":145,"area":"Sarjapur Road","url":"https://www.prestigeltd.in/"},
@@ -204,10 +213,10 @@ def build_index(pages):
     return {"index": index, "chunks": chunks, "metadata": metadata, "pages": pages}
 
 def groq_answer(question: str, retrieved):
-    api_key = st.secrets.get("GROQ_API_KEY", "") if hasattr(st, "secrets") else ""
-    api_key = api_key or os.getenv("GROQ_API_KEY", "")
+    api_key = st.secrets.get("GROQ_API_JNTU_KEY", "") if hasattr(st, "secrets") else ""
+    api_key = api_key or os.getenv("GROQ_API_JNTU_KEY", "")
     if not api_key:
-        raise RuntimeError("GROQ_API_KEY is missing. Add it in Streamlit Cloud → App settings → Secrets.")
+        raise RuntimeError("GROQ_API_JNTU_KEY is missing. Add it in Streamlit Cloud → App settings → Secrets.")
     context = "\n\n".join(
         f"[Source {i+1}] URL: {item['source']}\nContent: {item['text']}"
         for i, item in enumerate(retrieved)
@@ -298,7 +307,7 @@ with st.sidebar:
         else:
             st.warning("Choose a builder and enter a website URL.")
     st.markdown("---")
-    st.caption("Indexes are kept in this session. Re-index after app restarts. Respect site terms and rate limits.")
+    st.caption("Indexes are kept in this session. Re-index after app restarts. Respect website terms and rate limits.")
 
 # ---------------- Header ----------------
 st.markdown("""
@@ -353,15 +362,70 @@ if page == "Property Finder":
         cols = st.columns(3)
         for i, prop in enumerate(filtered_properties):
             with cols[i % 3]:
-                st.markdown('<div class="panel">', unsafe_allow_html=True)
-                st.markdown(f"### 🏠 {prop['name']}")
-                st.markdown(f"**{prop['builder']}**")
-                st.caption(f"📍 {prop['area']}, {prop['city']}")
-                st.markdown(f"**{prop['bhk']} BHK** · Apartment")
-                st.markdown(f"### ₹{prop['price_lakh']} lakh")
-                st.markdown(f"[Builder website ↗]({prop['url']})")
-                st.markdown("</div>", unsafe_allow_html=True)
-                st.write("")
+                st.markdown(f"""<div class="property-card">
+                  <div class="property-tag">🏠 PROPERTY</div>
+                  <div class="property-name">{prop['name']}</div>
+                  <div class="property-builder">{prop['builder']}</div>
+                  <div class="property-detail">📍 {prop['area']}, {prop['city']}</div>
+                  <div class="property-detail">🛏️ {prop['bhk']} BHK · Apartment</div>
+                  <div class="property-price">₹{prop['price_lakh']} lakh</div>
+                  <a class="property-link" href="{prop['url']}" target="_blank" rel="noopener noreferrer">Visit builder website ↗</a>
+                </div>""", unsafe_allow_html=True)
+    else:
+        st.info("No sample properties match these filters. Try a wider budget or choose Any city / Any BHK.")
+
+    st.markdown("---")
+    st.markdown("**Add website for RAG:** use the sidebar to select a builder, confirm the website URL, and click **Add website & index**. Then ask questions in RAG Assistant.")
+
+if page == "Property Finder":
+    st.markdown('<div class="section-title">Find your property</div><div class="section-sub">Choose a builder, BHK requirement, city, and budget range.</div>', unsafe_allow_html=True)
+    f1, f2, f3, f4 = st.columns([1.25, 1, 1, 1.35])
+    with f1:
+        selected_builder = st.selectbox("Builder name", ["All builders"] + [c["name"] for c in COMPANIES], key="property_builder")
+    with f2:
+        selected_bhk = st.selectbox("Requirement · BHK", ["Any", "1 BHK", "2 BHK", "3 BHK", "4 BHK", "5+ BHK"], key="property_bhk")
+    with f3:
+        selected_city = st.selectbox("Select city", ["Any city", "Bengaluru", "Chennai", "Hyderabad", "Mumbai", "Pune", "Delhi NCR"], key="property_city")
+    with f4:
+        budget = st.select_slider("Property range (₹ lakh)", options=[25, 50, 75, 100, 150, 200, 300, 500], value=(50, 200), key="property_budget")
+
+    filtered_properties = []
+    for prop in PROPERTIES:
+        if selected_builder != "All builders" and prop["builder"] != selected_builder:
+            continue
+        if selected_bhk != "Any":
+            requested_bhk = 5 if selected_bhk == "5+ BHK" else int(selected_bhk.split()[0])
+            if prop["bhk"] != requested_bhk:
+                continue
+        if selected_city != "Any city" and prop["city"] != selected_city:
+            continue
+        if not (budget[0] <= prop["price_lakh"] <= budget[1]):
+            continue
+        filtered_properties.append(prop)
+
+    m1, m2, m3 = st.columns(3)
+    with m1:
+        st.markdown(f'<div class="metric"><div class="metric-label">Matching properties</div><div class="metric-value">{len(filtered_properties)}</div></div>', unsafe_allow_html=True)
+    with m2:
+        st.markdown(f'<div class="metric"><div class="metric-label">Selected builder</div><div class="metric-value" style="font-size:1.15rem;">{selected_builder}</div></div>', unsafe_allow_html=True)
+    with m3:
+        st.markdown(f'<div class="metric"><div class="metric-label">Budget range</div><div class="metric-value" style="font-size:1.4rem;">₹{budget[0]}L–₹{budget[1]}L</div></div>', unsafe_allow_html=True)
+
+    st.markdown("")
+    st.markdown('<div class="section-title">Property results</div><div class="section-sub">Demo property records for UI testing only — not verified live listings.</div>', unsafe_allow_html=True)
+    if filtered_properties:
+        cols = st.columns(3)
+        for i, prop in enumerate(filtered_properties):
+            with cols[i % 3]:
+                st.markdown(f"""<div class="property-card">
+                  <div class="property-tag">🏠 PROPERTY</div>
+                  <div class="property-name">{prop['name']}</div>
+                  <div class="property-builder">{prop['builder']}</div>
+                  <div class="property-detail">📍 {prop['area']}, {prop['city']}</div>
+                  <div class="property-detail">🛏️ {prop['bhk']} BHK · Apartment</div>
+                  <div class="property-price">₹{prop['price_lakh']} lakh</div>
+                  <a class="property-link" href="{prop['url']}" target="_blank" rel="noopener noreferrer">Visit builder website ↗</a>
+                </div>""", unsafe_allow_html=True)
     else:
         st.info("No sample properties match these filters. Try a wider budget or choose Any city / Any BHK.")
 
@@ -484,7 +548,7 @@ elif page == "RAG Assistant":
                                 st.write(item["text"][:1200] + ("…" if len(item["text"]) > 1200 else ""))
             except Exception as exc:
                 st.error(f"Could not generate an answer: {exc}")
-                st.info("Check that GROQ_API_KEY is configured in Streamlit Cloud Secrets and that the API quota is available.")
+                st.info("Check that GROQ_API_JNTU_KEY is configured in Streamlit Cloud Secrets and that the API quota is available.")
 
 st.markdown("---")
 st.markdown("<div style='text-align:center;color:#8a96a8;font-size:.78rem;'>BuildWise · Construction Builder RAG · Streamlit</div>", unsafe_allow_html=True)
