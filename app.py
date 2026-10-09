@@ -544,4 +544,750 @@ def build_index(pages):
     chunks = []
     metadata = []
 
-    for page in
+    for page in pages:
+        for chunk in chunk_text(page["text"]):
+            chunks.append(chunk)
+            metadata.append({"source": page["url"]})
+
+    if not chunks:
+        raise ValueError(
+            "No usable text found. Try another official website."
+        )
+
+    vectors = model.encode(
+        chunks,
+        normalize_embeddings=True,
+        convert_to_numpy=True,
+        show_progress_bar=False,
+    ).astype("float32")
+
+    index = faiss.IndexFlatIP(vectors.shape[1])
+    index.add(vectors)
+
+    return {
+        "index": index,
+        "chunks": chunks,
+        "metadata": metadata,
+        "pages": pages,
+    }
+
+
+def retrieve(question, store):
+    model = load_embedding_model()
+
+    vector = model.encode(
+        [question],
+        normalize_embeddings=True,
+        convert_to_numpy=True,
+    ).astype("float32")
+
+    k = min(TOP_K, len(store["chunks"]))
+    scores, ids = store["index"].search(vector, k)
+
+    results = []
+
+    for score, idx in zip(scores[0], ids[0]):
+        if idx < 0:
+            continue
+
+        results.append({
+            "text": store["chunks"][idx],
+            "source": store["metadata"][idx]["source"],
+            "score": float(score),
+        })
+
+    return results
+
+
+def groq_answer(question, retrieved):
+    # Secret name matches your Streamlit configuration.
+    try:
+        api_key = st.secrets.get("GROQ_API_JNTU_KEY", "")
+    except Exception:
+        api_key = ""
+
+    api_key = api_key or os.getenv("GROQ_API_JNTU_KEY", "")
+
+    if not api_key:
+        raise RuntimeError(
+            "Add GROQ_API_JNTU_KEY to Streamlit Cloud Secrets."
+        )
+
+    context = "\n\n".join(
+        f"[Source {i + 1}] URL: {item['source']}\n"
+        f"Content: {item['text']}"
+        for i, item in enumerate(retrieved)
+    )
+
+    payload = {
+        "model": "llama-3.3-70b-versatile",
+        "temperature": 0.1,
+        "max_tokens": 900,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "You are BuildWise, a construction research assistant. "
+                    "Answer using only the retrieved website context. "
+                    "Do not invent property prices, projects, addresses, "
+                    "approvals, or contact information. If the answer is "
+                    "missing, say so. Cite evidence as [Source 1], etc."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Context:\n{context}\n\n"
+                    f"Question: {question}\n\n"
+                    "Answer using the context and cite sources."
+                ),
+            },
+        ],
+    }
+
+    response = requests.post(
+        "https://api.groq.com/openai/v1/chat/completions",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        json=payload,
+        timeout=60,
+    )
+
+    if response.status_code >= 400:
+        raise RuntimeError(
+            f"Groq API error ({response.status_code}). "
+            "Check your key, model availability, and API quota."
+        )
+
+    return response.json()["choices"][0]["message"]["content"].strip()
+
+
+# ============================================================
+# SESSION STATE
+# ============================================================
+
+if "knowledge_stores" not in st.session_state:
+    st.session_state.knowledge_stores = {}
+
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
+
+if "pending_question" not in st.session_state:
+    st.session_state.pending_question = ""
+
+
+# ============================================================
+# SIDEBAR
+# ============================================================
+
+with st.sidebar:
+    st.markdown("## 🏗️ BuildWise")
+    st.caption("Construction intelligence · RAG workspace")
+
+    page = st.radio(
+        "WORKSPACE",
+        [
+            "Property Finder",
+            "Overview",
+            "Builder Directory",
+            "Knowledge Sources",
+            "RAG Assistant",
+        ],
+        key="workspace_page",
+    )
+
+    st.divider()
+    st.markdown("### Add / index a builder website")
+
+    builder_names = [company["name"] for company in COMPANIES]
+
+    sidebar_builder = st.selectbox(
+        "Builder name",
+        builder_names,
+        key="sidebar_builder_select",
+    )
+
+    selected_company = next(
+        company for company in COMPANIES
+        if company["name"] == sidebar_builder
+    )
+
+    source_url = st.text_input(
+        "Website URL",
+        value=selected_company["url"],
+        key="sidebar_website_url",
+    )
+
+    max_pages = st.slider(
+        "Maximum pages to crawl",
+        min_value=1,
+        max_value=8,
+        value=5,
+        key="crawl_page_limit",
+    )
+
+    if st.button(
+        "＋ Add website & index",
+        type="primary",
+        use_container_width=True,
+        key="index_website_button",
+    ):
+        try:
+            normalized = normalize_url(source_url)
+
+            with st.spinner("Reading website and building index..."):
+                pages, errors = crawl_website(
+                    normalized, max_pages
+                )
+
+                if not pages:
+                    st.error(
+                        "No readable pages found. The website may block "
+                        "automated requests or use JavaScript rendering."
+                    )
+                else:
+                    store = build_index(pages)
+                    domain = urlparse(normalized).netloc
+
+                    st.session_state.knowledge_stores[domain] = store
+                    st.session_state.chat_history = []
+
+                    st.success(
+                        f"Indexed {len(pages)} pages and "
+                        f"{len(store['chunks'])} text chunks."
+                    )
+
+                    if errors:
+                        st.caption(
+                            f"{len(errors)} page(s) could not be read."
+                        )
+
+        except Exception as exc:
+            st.error(str(exc))
+
+    st.divider()
+
+    st.caption(
+        "Indexes are held in the current Streamlit session. "
+        "Re-index after session resets. Respect website terms "
+        "and crawling restrictions."
+    )
+
+
+# ============================================================
+# MAIN HEADER
+# ============================================================
+
+st.markdown("""
+<div class="hero">
+    <div class="eyebrow">CONSTRUCTION INTELLIGENCE WORKSPACE</div>
+    <h1>Find the right builder. Faster.</h1>
+    <p>
+        Explore property requirements, research builders, index official
+        websites, and ask grounded questions using RAG.
+    </p>
+</div>
+""", unsafe_allow_html=True)
+
+
+# ============================================================
+# PROPERTY FINDER
+# ============================================================
+
+if page == "Property Finder":
+
+    st.markdown(
+        '<div class="section-title">Find your property</div>',
+        unsafe_allow_html=True,
+    )
+
+    st.markdown(
+        '<div class="section-sub">'
+        'Choose a builder, BHK requirement, city, and budget range.'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+    col1, col2, col3, col4 = st.columns([1.25, 1, 1, 1.2])
+
+    with col1:
+        selected_builder = st.selectbox(
+            "Builder name",
+            ["All builders"] + builder_names,
+            key="property_builder_filter",
+        )
+
+    with col2:
+        selected_bhk = st.selectbox(
+            "Requirement · BHK",
+            ["Any BHK", "1 BHK", "2 BHK", "3 BHK", "4 BHK"],
+            key="property_bhk_filter",
+        )
+
+    with col3:
+        cities = sorted({p["city"] for p in PROPERTIES})
+
+        selected_city = st.selectbox(
+            "Select city",
+            ["Any city"] + cities,
+            key="property_city_filter",
+        )
+
+    with col4:
+        budget = st.slider(
+            "Property range (₹ lakh)",
+            min_value=25,
+            max_value=500,
+            value=(25, 500),
+            step=5,
+            key="property_budget_filter",
+        )
+
+    # Apply all selected filters.
+    filtered_properties = []
+
+    for prop in PROPERTIES:
+
+        if (
+            selected_builder != "All builders"
+            and prop["builder"] != selected_builder
+        ):
+            continue
+
+        if selected_bhk != "Any BHK":
+            required_bhk = int(selected_bhk.split()[0])
+
+            if prop["bhk"] != required_bhk:
+                continue
+
+        if (
+            selected_city != "Any city"
+            and prop["city"] != selected_city
+        ):
+            continue
+
+        if not (budget[0] <= prop["price"] <= budget[1]):
+            continue
+
+        filtered_properties.append(prop)
+
+    # Summary metrics.
+    m1, m2, m3 = st.columns(3)
+
+    with m1:
+        st.markdown(
+            f"""
+            <div class="metric-card">
+                <div class="metric-label">Matching properties</div>
+                <div class="metric-value">{len(filtered_properties)}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    with m2:
+        builder_display = (
+            selected_builder
+            if selected_builder != "All builders"
+            else "All builders"
+        )
+
+        st.markdown(
+            f"""
+            <div class="metric-card">
+                <div class="metric-label">Selected builder</div>
+                <div class="metric-value"
+                     style="font-size:1.25rem">
+                    {builder_display}
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    with m3:
+        st.markdown(
+            f"""
+            <div class="metric-card">
+                <div class="metric-label">Budget range</div>
+                <div class="metric-value"
+                     style="font-size:1.35rem">
+                    ₹{budget[0]}L–₹{budget[1]}L
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    st.write("")
+
+    st.markdown(
+        '<div class="section-title">Property results</div>',
+        unsafe_allow_html=True,
+    )
+
+    st.info(
+        "Demo property records for UI testing only. "
+        "These are not verified live listings or current offers."
+    )
+
+    if filtered_properties:
+
+        for start in range(0, len(filtered_properties), 3):
+            row_properties = filtered_properties[start:start + 3]
+            columns = st.columns(3)
+
+            for col, prop in zip(columns, row_properties):
+                with col:
+                    st.markdown(
+                        f"""
+                        <div class="property-card">
+                            <div style="font-size:2rem">🏠</div>
+                            <div class="property-name">
+                                {prop['name']}
+                            </div>
+                            <div class="property-builder">
+                                {prop['builder']}
+                            </div>
+                            <div>
+                                <span class="property-badge">
+                                    {prop['bhk']} BHK · {prop['type']}
+                                </span>
+                            </div>
+                            <div class="property-detail">
+                                📍 {prop['city']}
+                            </div>
+                            <div class="property-price">
+                                ₹{prop['price']} lakh
+                            </div>
+                            <a href="{prop['url']}" target="_blank">
+                                Builder official website ↗
+                            </a>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+
+    else:
+        st.warning(
+            "No sample properties match these filters. "
+            "Try a wider budget or choose Any city / Any BHK."
+        )
+
+    st.caption(
+        "Live property listings require a verified property data source "
+        "or an authorized listings API."
+    )
+
+
+# ============================================================
+# OVERVIEW
+# ============================================================
+
+elif page == "Overview":
+
+    stores = st.session_state.knowledge_stores
+    total_pages = sum(len(s["pages"]) for s in stores.values())
+    total_chunks = sum(len(s["chunks"]) for s in stores.values())
+
+    st.markdown(
+        '<div class="section-title">Workspace overview</div>',
+        unsafe_allow_html=True,
+    )
+
+    c1, c2, c3, c4 = st.columns(4)
+
+    metrics = [
+        (c1, "Builder profiles", len(COMPANIES)),
+        (c2, "Indexed websites", len(stores)),
+        (c3, "Pages indexed", total_pages),
+        (c4, "Vector chunks", total_chunks),
+    ]
+
+    for col, label, value in metrics:
+        with col:
+            st.markdown(
+                f"""
+                <div class="metric-card">
+                    <div class="metric-label">{label}</div>
+                    <div class="metric-value">{value}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+    st.write("")
+    st.markdown("### Getting started")
+
+    st.markdown("""
+    1. Select **Builder Directory** to explore company websites.
+    2. Choose a builder in the sidebar.
+    3. Click **Add website & index** to index public website content.
+    4. Open **Knowledge Sources** to review indexed pages.
+    5. Open **RAG Assistant** to ask questions about indexed content.
+    """)
+
+
+# ============================================================
+# BUILDER DIRECTORY
+# ============================================================
+
+elif page == "Builder Directory":
+
+    st.markdown(
+        '<div class="section-title">Builder Directory</div>',
+        unsafe_allow_html=True,
+    )
+
+    query = st.text_input(
+        "Search builders",
+        placeholder="Search by name, location, or construction type",
+        key="directory_search",
+    )
+
+    filtered_companies = [
+        company for company in COMPANIES
+        if query.lower() in (
+            company["name"] + " "
+            + company["type"] + " "
+            + company["location"]
+        ).lower()
+    ]
+
+    for start in range(0, len(filtered_companies), 2):
+        cols = st.columns(2)
+
+        for col, company in zip(
+            cols, filtered_companies[start:start + 2]
+        ):
+            with col:
+                st.markdown(
+                    f"""
+                    <div class="panel">
+                        <div style="font-size:1.7rem">🏢</div>
+                        <div class="property-name">
+                            {company['name']}
+                        </div>
+                        <div class="property-detail">
+                            {company['type']}
+                        </div>
+                        <div class="property-detail">
+                            📍 {company['location']}
+                        </div>
+                        <a href="{company['url']}" target="_blank">
+                            Visit official website ↗
+                        </a>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+                st.write("")
+
+    if not filtered_companies:
+        st.warning("No builders match your search.")
+
+
+# ============================================================
+# KNOWLEDGE SOURCES
+# ============================================================
+
+elif page == "Knowledge Sources":
+
+    stores = st.session_state.knowledge_stores
+
+    st.markdown(
+        '<div class="section-title">Knowledge Sources</div>',
+        unsafe_allow_html=True,
+    )
+
+    if not stores:
+        st.info(
+            "No websites indexed yet. Select a builder in the sidebar "
+            "and click Add website & index."
+        )
+
+    for domain, store in list(stores.items()):
+
+        with st.expander(
+            f"{domain} · {len(store['pages'])} pages · "
+            f"{len(store['chunks'])} chunks"
+        ):
+            for page_data in store["pages"]:
+                st.markdown(
+                    f"- [{page_data['url']}]({page_data['url']})"
+                )
+
+            if st.button(
+                f"Remove index: {domain}",
+                key=f"remove_index_{domain}",
+            ):
+                del st.session_state.knowledge_stores[domain]
+                st.rerun()
+
+    st.warning(
+        "Indexes are session-based. They may disappear when the "
+        "session resets or the app restarts."
+    )
+
+
+# ============================================================
+# RAG ASSISTANT
+# ============================================================
+
+elif page == "RAG Assistant":
+
+    stores = st.session_state.knowledge_stores
+
+    st.markdown(
+        '<div class="section-title">Builder RAG Assistant</div>',
+        unsafe_allow_html=True,
+    )
+
+    st.markdown(
+        '<div class="section-sub">'
+        'Ask questions about the public website pages you have indexed.'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+    if not stores:
+        st.warning(
+            "First index a builder website using the sidebar."
+        )
+
+    else:
+
+        domains = list(stores.keys())
+
+        selected_domain = st.selectbox(
+            "Search within indexed website",
+            ["All indexed websites"] + domains,
+            key="rag_domain_filter",
+        )
+
+        examples = [
+            "What does this company do?",
+            "What projects or services are described?",
+            "What contact information is available?",
+        ]
+
+        cols = st.columns(3)
+
+        for i, prompt in enumerate(examples):
+            with cols[i]:
+                if st.button(
+                    prompt,
+                    key=f"rag_example_{i}",
+                    use_container_width=True,
+                ):
+                    st.session_state.pending_question = prompt
+
+        for message in st.session_state.chat_history:
+            with st.chat_message(message["role"]):
+                st.markdown(message["content"])
+
+        question = st.chat_input(
+            "Ask about projects, services, or company details..."
+        )
+
+        if st.session_state.pending_question:
+            question = st.session_state.pending_question
+            st.session_state.pending_question = ""
+
+        if question:
+
+            st.session_state.chat_history.append({
+                "role": "user",
+                "content": question,
+            })
+
+            with st.chat_message("user"):
+                st.markdown(question)
+
+            with st.chat_message("assistant"):
+
+                try:
+                    if selected_domain == "All indexed websites":
+                        candidate_stores = stores
+                    else:
+                        candidate_stores = {
+                            selected_domain: stores[selected_domain]
+                        }
+
+                    retrieved = []
+
+                    for store in candidate_stores.values():
+                        retrieved.extend(retrieve(question, store))
+
+                    retrieved.sort(
+                        key=lambda item: item["score"],
+                        reverse=True,
+                    )
+
+                    retrieved = retrieved[:TOP_K]
+
+                    if (
+                        not retrieved
+                        or retrieved[0]["score"] < 0.15
+                    ):
+                        answer = (
+                            "I couldn't find relevant information "
+                            "in the indexed pages. Try indexing more "
+                            "pages or asking a more specific question."
+                        )
+                    else:
+                        answer = groq_answer(question, retrieved)
+
+                    st.markdown(answer)
+
+                    if retrieved:
+                        with st.expander("Retrieved source passages"):
+                            for i, item in enumerate(retrieved, 1):
+                                st.markdown(
+                                    f"**Source {i} · "
+                                    f"Similarity {item['score']:.3f}**"
+                                )
+
+                                st.markdown(
+                                    f"[{item['source']}]"
+                                    f"({item['source']})"
+                                )
+
+                                st.write(item["text"][:1000])
+
+                    st.session_state.chat_history.append({
+                        "role": "assistant",
+                        "content": answer,
+                    })
+
+                except Exception as exc:
+                    st.error(f"Could not generate an answer: {exc}")
+
+                    st.info(
+                        "Check your GROQ_API_JNTU_KEY in Streamlit "
+                        "Cloud Secrets and verify your API quota."
+                    )
+
+
+# ============================================================
+# FOOTER
+# ============================================================
+
+st.divider()
+
+st.markdown(
+    """
+    <div style="
+        text-align:center;
+        color:#64748b;
+        font-size:0.8rem;
+        padding:10px;
+    ">
+        BuildWise · Construction Builder RAG · Streamlit
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
